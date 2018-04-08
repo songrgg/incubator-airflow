@@ -32,6 +32,9 @@ class KubernetesPodOperator(BaseOperator):
 
             client = kube_client.get_kube_client(in_cluster=self.in_cluster)
             gen = pod_generator.PodGenerator()
+            gen.volumes = self.volumes
+            gen.volume_mounts = self.volume_mount
+            gen.env_vars = self.env_vars
 
             pod = gen.make_pod(namespace=self.namespace,
                                image=self.image,
@@ -65,9 +68,18 @@ class KubernetesPodOperator(BaseOperator):
                  startup_timeout_seconds=120,
                  kube_executor_config=None,
                  get_logs=True,
+                 env_vars=None,
+                 volumes=None,
+                 volume_mount=None,
                  *args,
                  **kwargs):
         super(KubernetesPodOperator, self).__init__(*args, **kwargs)
+        if env_vars is None:
+            env_vars = {}
+        if volumes is None:
+            volumes = []
+        if volume_mount is None:
+            volume_mount = []
         self.kube_executor_config = kube_executor_config or {}
         self.image = image
         self.namespace = namespace
@@ -78,3 +90,6 @@ class KubernetesPodOperator(BaseOperator):
         self.name = name
         self.in_cluster = in_cluster
         self.get_logs = get_logs
+        self.env_vars = env_vars
+        self.volumes = volumes
+        self.volume_mount = volume_mount
