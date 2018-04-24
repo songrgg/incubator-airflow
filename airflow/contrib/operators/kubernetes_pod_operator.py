@@ -36,14 +36,14 @@ class KubernetesPodOperator(BaseOperator):
             gen.volume_mounts = self.volume_mount
             gen.env_vars = self.env_vars
 
-            pod = gen.make_pod(namespace=self.namespace,
-                               image=self.image,
-                               pod_id=self.name,
-                               cmds=self.cmds,
-                               arguments=self.arguments,
-                               labels=self.labels,
-                               kube_executor_config=self.kube_executor_config
-                               )
+            pod = gen.make_pod(
+                namespace=self.namespace,
+                image=self.image,
+                pod_id=self.name,
+                cmds=self.cmds,
+                arguments=self.arguments,
+                labels=self.labels
+            )
 
             launcher = pod_launcher.PodLauncher(client)
             final_state = launcher.run_pod(
@@ -51,10 +51,9 @@ class KubernetesPodOperator(BaseOperator):
                 startup_timeout=self.startup_timeout_seconds,
                 get_logs=self.get_logs)
             if final_state != State.SUCCESS:
-                raise AirflowException("Pod returned a failure")
+                raise AirflowException('Pod returned a failure')
         except AirflowException as ex:
-            raise AirflowException("Pod Launching failed: {error}".format(error=ex))
-
+            raise AirflowException('Pod Launching failed: {error}'.format(error=ex))
 
     @apply_defaults
     def __init__(self,

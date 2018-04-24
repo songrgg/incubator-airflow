@@ -1,16 +1,21 @@
 # -*- coding: utf-8 -*-
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
 
 from __future__ import absolute_import
 from __future__ import division
@@ -45,13 +50,14 @@ import traceback
 import warnings
 import hashlib
 
+import uuid
 from datetime import datetime
 from urllib.parse import urlparse, quote
 
 from sqlalchemy import (
     Column, Integer, String, DateTime, Text, Boolean, ForeignKey, PickleType,
     Index, Float, LargeBinary)
-from sqlalchemy import func, or_, and_
+from sqlalchemy import func, or_, and_, true as sqltrue
 from sqlalchemy.ext.declarative import declarative_base, declared_attr
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import reconstructor, relationship, synonym
@@ -111,7 +117,7 @@ def get_fernet():
     except:
         raise AirflowException('Failed to import Fernet, it may not be installed')
     try:
-        return Fernet(configuration.get('core', 'FERNET_KEY').encode('utf-8'))
+        return Fernet(configuration.conf.get('core', 'FERNET_KEY').encode('utf-8'))
     except (ValueError, TypeError) as ve:
         raise AirflowException("Could not create Fernet object: {}".format(ve))
 
@@ -188,7 +194,7 @@ class DagBag(BaseDagBag, LoggingMixin):
             self,
             dag_folder=None,
             executor=None,
-            include_examples=configuration.getboolean('core', 'LOAD_EXAMPLES')):
+            include_examples=configuration.conf.getboolean('core', 'LOAD_EXAMPLES')):
 
         # do not use default arg in signature, to fix import cycle on plugin load
         if executor is None:
@@ -290,7 +296,7 @@ class DagBag(BaseDagBag, LoggingMixin):
             if mod_name in sys.modules:
                 del sys.modules[mod_name]
 
-            with timeout(configuration.getint('core', "DAGBAG_IMPORT_TIMEOUT")):
+            with timeout(configuration.conf.getint('core', "DAGBAG_IMPORT_TIMEOUT")):
                 try:
                     m = imp.load_source(mod_name, filepath)
                     mods.append(m)
@@ -359,7 +365,7 @@ class DagBag(BaseDagBag, LoggingMixin):
         from airflow.jobs import LocalTaskJob as LJ
         self.log.info("Finding 'running' jobs without a recent heartbeat")
         TI = TaskInstance
-        secs = configuration.getint('scheduler', 'scheduler_zombie_task_threshold')
+        secs = configuration.conf.getint('scheduler', 'scheduler_zombie_task_threshold')
         limit_dttm = timezone.utcnow() - timedelta(seconds=secs)
         self.log.info("Failing jobs without heartbeat after %s", limit_dttm)
 
@@ -680,6 +686,9 @@ class Connection(Base, LoggingMixin):
                                     "using non-encrypted value.")
                 self._extra = value
                 self.is_extra_encrypted = False
+        else:
+            self._extra = value
+            self.is_extra_encrypted = False
 
     @declared_attr
     def extra(cls):
@@ -816,6 +825,7 @@ class TaskInstance(Base, LoggingMixin):
     operator = Column(String(1000))
     queued_dttm = Column(UtcDateTime)
     pid = Column(Integer)
+    executor_config = Column(PickleType(pickler=dill))
 
     __table_args__ = (
         Index('ti_dag_state', dag_id, state),
@@ -854,10 +864,11 @@ class TaskInstance(Base, LoggingMixin):
         if state:
             self.state = state
         self.hostname = ''
+        self.executor_config = task.executor_config
         self.init_on_load()
         # Is this TaskInstance being currently running within `airflow run --raw`.
         # Not persisted to the database so only valid for the current process
-        self.is_raw = False
+        self.raw = False
 
     @reconstructor
     def init_on_load(self):
@@ -1034,14 +1045,14 @@ class TaskInstance(Base, LoggingMixin):
     @property
     def log_filepath(self):
         iso = self.execution_date.isoformat()
-        log = os.path.expanduser(configuration.get('core', 'BASE_LOG_FOLDER'))
+        log = os.path.expanduser(configuration.conf.get('core', 'BASE_LOG_FOLDER'))
         return (
             "{log}/{self.dag_id}/{self.task_id}/{iso}.log".format(**locals()))
 
     @property
     def log_url(self):
         iso = quote(self.execution_date.isoformat())
-        BASE_URL = configuration.get('webserver', 'BASE_URL')
+        BASE_URL = configuration.conf.get('webserver', 'BASE_URL')
         if settings.RBAC:
             return BASE_URL + (
                 "/log/list/"
@@ -1060,7 +1071,7 @@ class TaskInstance(Base, LoggingMixin):
     @property
     def mark_success_url(self):
         iso = quote(self.execution_date.isoformat())
-        BASE_URL = configuration.get('webserver', 'BASE_URL')
+        BASE_URL = configuration.conf.get('webserver', 'BASE_URL')
         if settings.RBAC:
             return BASE_URL + (
                 "/success"
@@ -1139,6 +1150,7 @@ class TaskInstance(Base, LoggingMixin):
             self.max_tries = ti.max_tries
             self.hostname = ti.hostname
             self.pid = ti.pid
+            self.executor_config = ti.executor_config
         else:
             self.state = None
 
@@ -1539,8 +1551,7 @@ class TaskInstance(Base, LoggingMixin):
                 self.task = task_copy
 
                 def signal_handler(signum, frame):
-                    """Setting kill signal handler"""
-                    self.log.error("Killing subprocess")
+                    self.log.error("Received SIGTERM. Terminating subprocesses.")
                     task_copy.on_kill()
                     raise AirflowException("Task received SIGTERM signal")
                 signal.signal(signal.SIGTERM, signal_handler)
@@ -1957,8 +1968,8 @@ class TaskInstance(Base, LoggingMixin):
         """
         Sets the log context.
         """
-        self._set_context(self)
         self.raw = raw
+        self._set_context(self)
 
 
 class TaskFail(Base):
@@ -1981,7 +1992,10 @@ class TaskFail(Base):
         self.execution_date = execution_date
         self.start_date = start_date
         self.end_date = end_date
-        self.duration = (self.end_date - self.start_date).total_seconds()
+        if self.end_date and self.start_date:
+            self.duration = (self.end_date - self.start_date).total_seconds()
+        else:
+            self.duration = None
 
 
 class Log(Base):
@@ -2210,6 +2224,18 @@ class BaseOperator(LoggingMixin):
     :param task_concurrency: When set, a task will be able to limit the concurrent
         runs across execution_dates
     :type task_concurrency: int
+    :param executor_config: Additional task-level configuration parameters that are
+        interpreted by a specific executor. Parameters are namespaced by the name of
+        executor.
+        ``example: to run this task in a specific docker container through
+        the KubernetesExecutor
+        MyOperator(...,
+            executor_config={
+            "KubernetesExecutor":
+                {"image": "myCustomDockerImage"}
+                }
+        )``
+    :type executor_config: dict
     """
 
     # For derived classes to define which fields will get jinjaified
@@ -2224,7 +2250,7 @@ class BaseOperator(LoggingMixin):
     def __init__(
             self,
             task_id,
-            owner=configuration.get('operators', 'DEFAULT_OWNER'),
+            owner=configuration.conf.get('operators', 'DEFAULT_OWNER'),
             email=None,
             email_on_retry=True,
             email_on_failure=True,
@@ -2243,7 +2269,7 @@ class BaseOperator(LoggingMixin):
             adhoc=False,
             priority_weight=1,
             weight_rule=WeightRule.DOWNSTREAM,
-            queue=configuration.get('celery', 'default_queue'),
+            queue=configuration.conf.get('celery', 'default_queue'),
             pool=None,
             sla=None,
             execution_timeout=None,
@@ -2254,6 +2280,7 @@ class BaseOperator(LoggingMixin):
             resources=None,
             run_as_user=None,
             task_concurrency=None,
+            executor_config=None,
             *args,
             **kwargs):
 
@@ -2328,6 +2355,7 @@ class BaseOperator(LoggingMixin):
         self.resources = Resources(**(resources or {}))
         self.run_as_user = run_as_user
         self.task_concurrency = task_concurrency
+        self.executor_config = executor_config or {}
 
         # Private attributes
         self._upstream_task_ids = set()
@@ -2903,7 +2931,7 @@ class DagModel(Base):
     dag_id = Column(String(ID_LEN), primary_key=True)
     # A DAG can be paused from the UI / DB
     # Set this default value of is_paused based on a configuration value!
-    is_paused_at_creation = configuration.getboolean('core',
+    is_paused_at_creation = configuration.conf.getboolean('core',
                                                      'dags_are_paused_at_creation')
     is_paused = Column(Boolean, default=is_paused_at_creation)
     # Whether the DAG is a subdag
@@ -3029,14 +3057,14 @@ class DAG(BaseDag, LoggingMixin):
             user_defined_macros=None,
             user_defined_filters=None,
             default_args=None,
-            concurrency=configuration.getint('core', 'dag_concurrency'),
-            max_active_runs=configuration.getint(
+            concurrency=configuration.conf.getint('core', 'dag_concurrency'),
+            max_active_runs=configuration.conf.getint(
                 'core', 'max_active_runs_per_dag'),
             dagrun_timeout=None,
             sla_miss_callback=None,
-            default_view=configuration.get('webserver', 'dag_default_view').lower(),
-            orientation=configuration.get('webserver', 'dag_orientation'),
-            catchup=configuration.getboolean('scheduler', 'catchup_by_default'),
+            default_view=configuration.conf.get('webserver', 'dag_default_view').lower(),
+            orientation=configuration.conf.get('webserver', 'dag_orientation'),
+            catchup=configuration.conf.getboolean('scheduler', 'catchup_by_default'),
             on_success_callback=None, on_failure_callback=None,
             params=None):
 
@@ -3066,7 +3094,7 @@ class DAG(BaseDag, LoggingMixin):
         # set timezone
         if start_date and start_date.tzinfo:
             self.timezone = start_date.tzinfo
-        elif 'start_date' in self.default_args:
+        elif 'start_date' in self.default_args and self.default_args['start_date']:
             if isinstance(self.default_args['start_date'], six.string_types):
                 self.default_args['start_date'] = (
                     timezone.parse(self.default_args['start_date'])
@@ -3885,7 +3913,7 @@ class DAG(BaseDag, LoggingMixin):
             include_adhoc=False,
             local=False,
             executor=None,
-            donot_pickle=configuration.getboolean('core', 'donot_pickle'),
+            donot_pickle=configuration.conf.getboolean('core', 'donot_pickle'),
             ignore_task_deps=False,
             ignore_first_depends_on_past=False,
             pool=None,
@@ -4348,7 +4376,9 @@ class XCom(Base, LoggingMixin):
         session.expunge_all()
 
         if enable_pickling is None:
-            enable_pickling = configuration.getboolean('core', 'enable_xcom_pickling')
+            enable_pickling = configuration.conf.getboolean(
+                'core', 'enable_xcom_pickling'
+            )
 
         if enable_pickling:
             value = pickle.dumps(value)
@@ -4420,7 +4450,9 @@ class XCom(Base, LoggingMixin):
         result = query.first()
         if result:
             if enable_pickling is None:
-                enable_pickling = configuration.getboolean('core', 'enable_xcom_pickling')
+                enable_pickling = configuration.conf.getboolean(
+                    'core', 'enable_xcom_pickling'
+                )
 
             if enable_pickling:
                 return pickle.loads(result.value)
@@ -4470,7 +4502,9 @@ class XCom(Base, LoggingMixin):
                 .limit(limit))
         results = query.all()
         if enable_pickling is None:
-            enable_pickling = configuration.getboolean('core', 'enable_xcom_pickling')
+            enable_pickling = configuration.conf.getboolean(
+                'core', 'enable_xcom_pickling'
+            )
         for result in results:
             if enable_pickling:
                 result.value = pickle.loads(result.value)
@@ -5083,3 +5117,57 @@ class ImportError(Base):
     timestamp = Column(UtcDateTime)
     filename = Column(String(1024))
     stacktrace = Column(Text)
+
+
+class KubeResourceVersion(Base):
+    __tablename__ = "kube_resource_version"
+    one_row_id = Column(Boolean, server_default=sqltrue(), primary_key=True)
+    resource_version = Column(String(255))
+
+    @staticmethod
+    @provide_session
+    def get_current_resource_version(session=None):
+        (resource_version,) = session.query(KubeResourceVersion.resource_version).one()
+        return resource_version
+
+    @staticmethod
+    @provide_session
+    def checkpoint_resource_version(resource_version, session=None):
+        if resource_version:
+            session.query(KubeResourceVersion).update({
+                KubeResourceVersion.resource_version: resource_version
+            })
+            session.commit()
+
+    @staticmethod
+    @provide_session
+    def reset_resource_version(session=None):
+        session.query(KubeResourceVersion).update({
+            KubeResourceVersion.resource_version: '0'
+        })
+        session.commit()
+        return '0'
+
+
+class KubeWorkerIdentifier(Base):
+    __tablename__ = "kube_worker_uuid"
+    one_row_id = Column(Boolean, server_default=sqltrue(), primary_key=True)
+    worker_uuid = Column(String(255))
+
+    @staticmethod
+    @provide_session
+    def get_or_create_current_kube_worker_uuid(session=None):
+        (worker_uuid,) = session.query(KubeWorkerIdentifier.worker_uuid).one()
+        if worker_uuid == '':
+            worker_uuid = str(uuid.uuid4())
+            KubeWorkerIdentifier.checkpoint_kube_worker_uuid(worker_uuid, session)
+        return worker_uuid
+
+    @staticmethod
+    @provide_session
+    def checkpoint_kube_worker_uuid(worker_uuid, session=None):
+        if worker_uuid:
+            session.query(KubeWorkerIdentifier).update({
+                KubeWorkerIdentifier.worker_uuid: worker_uuid
+            })
+            session.commit()
